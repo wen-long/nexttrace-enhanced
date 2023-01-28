@@ -19,6 +19,8 @@ type Source = func(ip string) (*IPGeoData, error)
 
 func GetSource(s string) Source {
 	switch strings.ToUpper(s) {
+	case "NONE":
+		return nil
 	case "LEOMOEAPI":
 		return LeoIP
 	case "IP.SB":

@@ -112,6 +112,7 @@ type Hop struct {
 	RTT      time.Duration
 	Error    error
 	Geo      *ipgeo.IPGeoData
+	Repeat   int
 }
 
 func (h *Hop) fetchIPData(c Config) (err error) {

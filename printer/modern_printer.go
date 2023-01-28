@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/fatih/color"
 	"github.com/OwO-Network/nexttrace-enhanced/trace"
+	"github.com/fatih/color"
 )
 
 func RealtimePrinter(res *trace.Result, ttl int) {
@@ -61,6 +61,10 @@ func RealtimePrinter(res *trace.Result, ttl int) {
 		}
 
 		i, _ := strconv.Atoi(v[0])
+		if res.Hops[ttl][i].Geo == nil {
+			fmt.Println()
+			continue
+		}
 		if res.Hops[ttl][i].Geo.Asnumber != "" {
 			// CMIN2, CUII, CN2, CUG 改为壕金色高亮
 			switch {

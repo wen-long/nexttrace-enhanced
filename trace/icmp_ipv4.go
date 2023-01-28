@@ -72,38 +72,78 @@ func (t *ICMPTracer) Execute() (*Result, error) {
 	go t.listenICMP()
 	t.wg.Add(1)
 	go t.PrintFunc()
+
+	resByHop := make([]sync.Map, t.MaxHops+1)
 	for ttl := t.BeginHop; ttl <= t.MaxHops; ttl++ {
 		t.inflightRequestLock.Lock()
 		t.inflightRequest[ttl] = make(chan Hop, t.NumMeasurements)
 		t.inflightRequestLock.Unlock()
-		if t.final != -1 && ttl > t.final {
-			break
-		}
-		for i := 0; i < t.NumMeasurements; i++ {
-			t.wg.Add(1)
-			go t.send(ttl)
-		}
-		<-time.After(time.Millisecond * 100)
 	}
 
-	t.wg.Wait()
-	t.res.reduce(t.final)
-	if t.final != -1 {
-		if t.RealtimePrinter != nil {
-			t.RealtimePrinter(&t.res, t.final-1)
+	for ttl := t.BeginHop; ttl <= t.MaxHops; ttl++ {
+		go t.receive(ttl, &resByHop[ttl])
+	}
+
+	start := time.Now()
+	for i := 0; i < t.NumMeasurements; i++ {
+		for ttl := t.BeginHop; ttl <= t.MaxHops; ttl++ {
+			t.wg.Add(1)
+			go t.send(ttl)
+			time.Sleep(200 * time.Microsecond)
 		}
-	} else {
-		for i := 0; i < t.NumMeasurements; i++ {
-			t.res.add(Hop{
+	}
+	fmt.Printf("all icmp request sent in, %v\n", time.Since(start))
+	// 最后一次发送后再等 300 ms
+	//<-time.After(time.Millisecond * 300)
+
+	for true {
+		count := 0
+		for _, s := range resByHop {
+			s.Range(func(key, value any) bool {
+				count += 1
+				return false
+			})
+		}
+		if count > 20 {
+			break
+		}
+		if time.Since(start) > 2*time.Second {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	targetFind := false
+	hopCount := 0
+	for i, resMap := range resByHop {
+		resMap.Range(func(ipStr, v any) bool {
+			hopRes := v.(*Hop)
+			if t.DestIP.String() == hopRes.Address.String() {
+				if !targetFind {
+					hopCount = i
+					targetFind = true
+				} else {
+					return false
+				}
+			}
+			t.res.add(*hopRes)
+			return true
+		})
+	}
+
+	//t.wg.Wait()
+	t.res.reduce(hopCount)
+	for i, _ := range t.res.Hops {
+		if len(t.res.Hops[i]) == 0 {
+			t.res.Hops[i] = append(t.res.Hops[i], Hop{
 				Success: false,
 				Address: nil,
-				TTL:     30,
+				TTL:     i + 1,
 				RTT:     0,
 				Error:   ErrHopLimitTimeout,
 			})
 		}
 		if t.RealtimePrinter != nil {
-			t.RealtimePrinter(&t.res, t.MaxHops-1)
+			t.RealtimePrinter(&t.res, i)
 		}
 	}
 	return &t.res, nil
@@ -120,7 +160,6 @@ func (t *ICMPTracer) listenICMP() {
 			if msg.N == nil {
 				continue
 			}
-			// log.Println(msg.Msg)
 			if msg.Msg[0] == 0 {
 				rm, err := icmp.ParseMessage(1, msg.Msg[:*msg.N])
 				if err != nil {
@@ -260,56 +299,57 @@ func (t *ICMPTracer) send(ttl int) error {
 		log.Fatal(err)
 	}
 
-	start := time.Now()
+	//start := time.Now()
 	if _, err := t.icmpListen.WriteTo(wb, &net.IPAddr{IP: t.DestIP}); err != nil {
 		log.Fatal(err)
 	}
 	if err := t.icmpListen.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		log.Fatal(err)
 	}
+	return nil
+}
 
-	select {
-	case <-t.ctx.Done():
-		return nil
-	case h := <-t.inflightRequest[ttl]:
-		rtt := time.Since(start)
-		if t.final != -1 && ttl > t.final {
+func (t *ICMPTracer) receive(ttl int, resMap *sync.Map) error {
+	start := time.Now()
+
+	t.inflightRequestLock.Lock()
+	c := t.inflightRequest[ttl]
+	t.inflightRequestLock.Unlock()
+	for {
+		select {
+		case <-t.ctx.Done():
 			return nil
-		}
-		if addr, ok := h.Address.(*net.IPAddr); ok && addr.IP.Equal(t.DestIP) {
-			t.finalLock.Lock()
-			if t.final == -1 || ttl < t.final {
-
-				t.final = ttl
+		case h := <-c:
+			rtt := time.Since(start)
+			addr, ok := h.Address.(*net.IPAddr)
+			if !ok {
+				continue
 			}
-			t.finalLock.Unlock()
-		} else if addr, ok := h.Address.(*net.TCPAddr); ok && addr.IP.Equal(t.DestIP) {
-			t.finalLock.Lock()
-			if t.final == -1 || ttl < t.final {
-				t.final = ttl
+			var hopRes *Hop
+			ipStr := addr.String()
+			v, ok := resMap.Load(ipStr)
+			if ok {
+				hopRes = v.(*Hop)
+				hopRes.Repeat += 1
+				//fmt.Printf("receive, ttl %d, %v\n", ttl, hopRes)
+				continue
 			}
-			t.finalLock.Unlock()
+
+			// new IP
+
+			h.TTL = ttl
+			h.RTT = rtt
+			h.Repeat = 1
+			//fmt.Printf("receive, ttl %d, %v\n", ttl, h)
+
+			resMap.Store(ipStr, &h)
+
+			// ip date available or not, both ok
+			go func() {
+				h.fetchIPData(t.Config)
+			}()
+
 		}
-
-		h.TTL = ttl
-		h.RTT = rtt
-
-		h.fetchIPData(t.Config)
-
-		t.res.add(h)
-	case <-time.After(t.Timeout):
-		if t.final != -1 && ttl > t.final {
-			return nil
-		}
-
-		t.res.add(Hop{
-			Success: false,
-			Address: nil,
-			TTL:     ttl,
-			RTT:     0,
-			Error:   ErrHopLimitTimeout,
-		})
-
 	}
 
 	return nil

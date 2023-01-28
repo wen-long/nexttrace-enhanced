@@ -5,8 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tidwall/gjson"
 	"github.com/OwO-Network/nexttrace-enhanced/wshandle"
+	"github.com/tidwall/gjson"
 )
 
 /***
@@ -68,12 +68,14 @@ func receiveParse() {
 func LeoIP(ip string) (*IPGeoData, error) {
 	// 初始化通道 - 向池子里添加IP的Channel，返回IP数据是通过字典中对应键为IP的Channel来获取的
 	IPPools.poolMux.Lock()
-	defer IPPools.poolMux.Unlock()
 	// 如果之前已经被别的协程初始化过了就不用初始化了
 	if IPPools.pool[ip] == nil {
 		IPPools.pool[ip] = make(chan IPGeoData)
 	}
+	c := IPPools.pool[ip]
+	IPPools.poolMux.Unlock()
 
+	// todo singleflight
 	// 发送请求
 	sendIPRequest(ip)
 	// 同步开启监听
@@ -81,7 +83,7 @@ func LeoIP(ip string) (*IPGeoData, error) {
 
 	// 拥塞，等待数据返回
 	select {
-	case res := <-IPPools.pool[ip]:
+	case res := <-c:
 		return &res, nil
 	// 5秒后依旧没有接收到返回的IP数据，不再等待，超时异常处理
 	case <-time.After(5 * time.Second):
